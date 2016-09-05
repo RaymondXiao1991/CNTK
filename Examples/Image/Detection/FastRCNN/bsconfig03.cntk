@@ -1,15 +1,17 @@
-command=Train
+#command=Train
+command=Write
+#makeMode = false
 
 precision="float"
 deviceId="Auto"
 parallelTrain="false"
-makeMode = false
 
 rootDir = "." ; 
 dataDir  = "$rootDir$/data/" ; 
-modelDir = "C:\Temp\RCNN\Output"
+outputDir = "$rootDir$/Output"
+modelDir = "$outputDir$"
 
-modelPath = "$modelDir$/RCNN-test02.bs"
+modelPath = "$modelDir$/RCNN-test03.bs"
 
 ImageH = 1000
 ImageW = 1000
@@ -18,18 +20,17 @@ ImageW = 1000
 ImageC = 3
 
 NumLabels = 21
-NumTrainROIs = 64
 
+NumTrainROIs = 64
 TrainROIDim = 256               # $NumTrainROIs$ * 4 
 TrainROILabelDim = 1344         # $NumTrainROIs$ * $NumLabels$
 
-numPred = 128                   # $NumTrainROIs$ * minibatchSize
-
-#TestROIDim = 8000
-#TestROINumLabels = 42000
+NumTestROIs = 200
+TestROIDim = 800
+TestROINumLabels = 4200
 
 traceLevel=1
-stderr="$modelDir$/bstest02.log"
+stderr="$modelDir$/bstest03.log"
 
 Train = [
     action = "train"
@@ -126,7 +127,96 @@ Train = [
             file="$dataDir$/tv2012pad.txt"
             input = [
                 features = [ transforms = (
-                    #[ type = "ScaleSide" ; target = $ImageW$ ; side = "max" ]:
+                    [ type = "ScaleSide" ; target = $ImageW$ ; side = "max" ]:
+                    [ type = "Pad" ; width = $ImageW$ ; height = $ImageH$; channels = $ImageC$; value = 114 ]:
+                    [ type = "Mean" ; meanFile = "$rootDir$/ImageNet500_mean.xml" ]
+                    [ type = "Transpose" ]
+                )]
+                ignored=[labelDim=1000]
+            ]
+        ])
+    ]
+]
+
+AdjustRoiDim=[
+    action="edit"
+    CurModel="$modelDir$/RCNN-test02.bs"                #"$modelPath$"
+    NewModel="$modelDir$/RCNN-test02.bs03.test"         #"$modelPath$.test"
+    editPath="$rootDir$/AdjustRoiDim.txt"
+]
+
+Write=[
+    action="write"
+    minibatchSize=8
+
+    #modelPath = "$modelDir$/RCNN-test02.bs03.testxx"         #"$modelPath$.test"
+    
+    BrainScriptNetworkBuilder = [
+        CrossEntropyWithSoftmaxND (y, z, axis=0) = ReduceLogSum (z, axis=axis) - ReduceSum (y .* z, axis=axis)
+        # account for all wrong predictions, max 1 per instance
+        MyClassificationErrorND (out, labels, axis=1, tag='') = {
+            axmax = ReduceMax (out, axis=axis)          # max value along competition axis
+            pred = Equal(out, axmax)                    # 1 for all values that are max
+            wrongPred = NotEqual (labels, pred)         # look up all wrong predictions [label index]
+            axErr = ReduceSum(wrongPred, axis=axis)     # sum up wrong predictions  along competition axis
+            capErr = GreaterEqual (axErr, Constant(1))  # only count maximally one error per prediction
+            err = ReduceMean (capErr, tag=tag)          # average into a single number per sample
+        }.err
+
+        imageShape = $ImageH$:$ImageW$:$ImageC$        # 500:500:3
+        labelShape = $NumLabels$:$NumTestROIs$         # 21:200
+        ROIShape = $TestROIDim$                        # 800
+
+        # load network
+        network = BS.Network.Load ("$modelDir$/RCNN-test02.bs")
+        # create a trainable clone and a read-only reference clone
+        adaptNet = BS.Network.CloneFunction ((network.features:network.rois), [ z = network.z ], parameters="constant")
+
+        features = Input (imageShape)
+        roiLabels = Input (labelShape)
+        rois = Input (ROIShape)
+
+        z = adaptNet(features, rois)
+        
+        ce = CrossEntropyWithSoftmaxND (roiLabels, z, axis=1)
+        errs = MyClassificationErrorND(z, roiLabels, axis=1)
+        
+        featureNodes    = (features:rois)
+        labelNodes      = (roiLabels)
+        criterionNodes  = (ce)
+        evaluationNodes = (errs)
+        outputNodes     = (z)
+    ]
+    
+    outputPath="$OutputDir$/write_bs03_model02"
+    
+    reader = [
+        randomize = false
+        verbosity = 2
+        deserializers = ([
+            type = "CNTKTextFormatDeserializer" ; module = "CNTKTextFormatReader"
+            file = "$dataDir$/test2007pad_all.rois.txt"
+            input = [
+                rois = [
+                    dim = $TrainROIDim$
+                    format = "dense"
+                ]
+            ]
+        ]:[
+            type = "CNTKTextFormatDeserializer" ; module = "CNTKTextFormatReader"
+            file = "$dataDir$/test2007pad_all.roilabels.txt"
+            input = [
+                roiLabels = [
+                    dim = $TrainROILabelDim$
+                    format = "dense"
+                ]
+            ]
+        ]:[
+            type = "ImageDeserializer" ; module = "ImageReader"
+            file="$dataDir$/test2007pad_all.txt"
+            input = [
+                features = [ transforms = (
+                    [ type = "ScaleSide" ; target = $ImageW$ ; side = "max" ]:
                     [ type = "Pad" ; width = $ImageW$ ; height = $ImageH$; channels = $ImageC$; value = 114 ]:
                     [ type = "Mean" ; meanFile = "$rootDir$/ImageNet500_mean.xml" ]
                     [ type = "Transpose" ]
