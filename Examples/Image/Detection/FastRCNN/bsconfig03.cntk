@@ -1,5 +1,5 @@
 #command=Train
-command=Write
+command=Test #Write
 #makeMode = false
 
 precision="float"
@@ -27,7 +27,7 @@ TrainROILabelDim = 1344         # $NumTrainROIs$ * $NumLabels$
 
 NumTestROIs = 200
 TestROIDim = 800
-TestROINumLabels = 4200
+TestROILabelDim = 4200
 
 traceLevel=1
 stderr="$modelDir$/bstest03.log"
@@ -129,7 +129,7 @@ Train = [
                 features = [ transforms = (
                     [ type = "ScaleSide" ; target = $ImageW$ ; side = "max" ]:
                     [ type = "Pad" ; width = $ImageW$ ; height = $ImageH$; channels = $ImageC$; value = 114 ]:
-                    [ type = "Mean" ; meanFile = "$rootDir$/ImageNet500_mean.xml" ]
+                    #[ type = "Mean" ; meanFile = "$rootDir$/ImageNet500_mean.xml" ]
                     [ type = "Transpose" ]
                 )]
                 ignored=[labelDim=1000]
@@ -138,16 +138,9 @@ Train = [
     ]
 ]
 
-AdjustRoiDim=[
-    action="edit"
-    CurModel="$modelDir$/RCNN-test02.bs"                #"$modelPath$"
-    NewModel="$modelDir$/RCNN-test02.bs03.test"         #"$modelPath$.test"
-    editPath="$rootDir$/AdjustRoiDim.txt"
-]
-
 Write=[
     action="write"
-    minibatchSize=8
+    minibatchSize=1
 
     #modelPath = "$modelDir$/RCNN-test02.bs03.testxx"         #"$modelPath$.test"
     
@@ -163,7 +156,7 @@ Write=[
             err = ReduceMean (capErr, tag=tag)          # average into a single number per sample
         }.err
 
-        imageShape = $ImageH$:$ImageW$:$ImageC$        # 500:500:3
+        imageShape = $ImageH$:$ImageW$:$ImageC$        # 1000:1000:3
         labelShape = $NumLabels$:$NumTestROIs$         # 21:200
         ROIShape = $TestROIDim$                        # 800
 
@@ -176,7 +169,7 @@ Write=[
         roiLabels = Input (labelShape)
         rois = Input (ROIShape)
 
-        z = adaptNet(features, rois)
+        z = adaptNet(features, rois).z
         
         ce = CrossEntropyWithSoftmaxND (roiLabels, z, axis=1)
         errs = MyClassificationErrorND(z, roiLabels, axis=1)
@@ -198,7 +191,7 @@ Write=[
             file = "$dataDir$/test2007pad_all.rois.txt"
             input = [
                 rois = [
-                    dim = $TrainROIDim$
+                    dim = $TestROIDim$
                     format = "dense"
                 ]
             ]
@@ -207,7 +200,7 @@ Write=[
             file = "$dataDir$/test2007pad_all.roilabels.txt"
             input = [
                 roiLabels = [
-                    dim = $TrainROILabelDim$
+                    dim = $TestROILabelDim$
                     format = "dense"
                 ]
             ]
@@ -218,7 +211,88 @@ Write=[
                 features = [ transforms = (
                     [ type = "ScaleSide" ; target = $ImageW$ ; side = "max" ]:
                     [ type = "Pad" ; width = $ImageW$ ; height = $ImageH$; channels = $ImageC$; value = 114 ]:
-                    [ type = "Mean" ; meanFile = "$rootDir$/ImageNet500_mean.xml" ]
+                    #[ type = "Mean" ; meanFile = "$rootDir$/ImageNet500_mean.xml" ]
+                    [ type = "Transpose" ]
+                )]
+                ignored=[labelDim=1000]
+            ]
+        ])
+    ]
+]
+
+Test=[
+    action="test"
+    minibatchSize=1
+
+    #modelPath = "$modelDir$/RCNN-test02.bs03.testxx"         #"$modelPath$.test"
+    #outputPath="$OutputDir$/write_bs03_model02"
+    
+    BrainScriptNetworkBuilder = [
+        CrossEntropyWithSoftmaxND (y, z, axis=0) = ReduceLogSum (z, axis=axis) - ReduceSum (y .* z, axis=axis)
+        # account for all wrong predictions, max 1 per instance
+        MyClassificationErrorND (out, labels, axis=1, tag='') = {
+            axmax = ReduceMax (out, axis=axis)          # max value along competition axis
+            pred = Equal(out, axmax)                    # 1 for all values that are max
+            wrongPred = NotEqual (labels, pred)         # look up all wrong predictions [label index]
+            axErr = ReduceSum(wrongPred, axis=axis)     # sum up wrong predictions  along competition axis
+            capErr = GreaterEqual (axErr, Constant(1))  # only count maximally one error per prediction
+            err = ReduceMean (capErr, tag=tag)          # average into a single number per sample
+        }.err
+
+        imageShape = $ImageH$:$ImageW$:$ImageC$        # 1000:1000:3
+        labelShape = $NumLabels$:$NumTestROIs$         # 21:200
+        ROIShape = $TestROIDim$                        # 800
+
+        # load network
+        network = BS.Network.Load ("$modelDir$/RCNN-test02.bs")
+        # create a trainable clone and a read-only reference clone
+        adaptNet = BS.Network.CloneFunction ((network.features:network.rois), [ z = network.z ], parameters="constant")
+
+        features = Input (imageShape)
+        roiLabels = Input (labelShape)
+        rois = Input (ROIShape)
+
+        z = adaptNet(features, rois).z
+        
+        ce = CrossEntropyWithSoftmaxND (roiLabels, z, axis=1)
+        errs = MyClassificationErrorND(z, roiLabels, axis=1)
+        
+        featureNodes    = (features:rois)
+        labelNodes      = (roiLabels)
+        criterionNodes  = (ce)
+        evaluationNodes = (errs)
+        outputNodes     = (z)
+    ]
+    
+    reader = [
+        randomize = false
+        verbosity = 2
+        deserializers = ([
+            type = "CNTKTextFormatDeserializer" ; module = "CNTKTextFormatReader"
+            file = "$dataDir$/test2007pad_all.rois.txt"
+            input = [
+                rois = [
+                    dim = $TestROIDim$
+                    format = "dense"
+                ]
+            ]
+        ]:[
+            type = "CNTKTextFormatDeserializer" ; module = "CNTKTextFormatReader"
+            file = "$dataDir$/test2007pad_all.roilabels.txt"
+            input = [
+                roiLabels = [
+                    dim = $TestROILabelDim$
+                    format = "dense"
+                ]
+            ]
+        ]:[
+            type = "ImageDeserializer" ; module = "ImageReader"
+            file="$dataDir$/test2007pad_all.txt"
+            input = [
+                features = [ transforms = (
+                    [ type = "ScaleSide" ; target = $ImageW$ ; side = "max" ]:
+                    [ type = "Pad" ; width = $ImageW$ ; height = $ImageH$; channels = $ImageC$; value = 114 ]:
+                    #[ type = "Mean" ; meanFile = "$rootDir$/ImageNet500_mean.xml" ]
                     [ type = "Transpose" ]
                 )]
                 ignored=[labelDim=1000]
